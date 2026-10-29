@@ -19,6 +19,7 @@ impl FrameConfig {
         let frame_style = match pane_frame_style {
             "full" => PaneFrameStyle::Full,
             "titles" => PaneFrameStyle::Titles,
+            "none" => PaneFrameStyle::None,
             _ => PaneFrameStyle::Titles,
         };
 
@@ -73,10 +74,9 @@ pub fn hide_frames_conditionally(
         .collect();
 
     tracing::debug!("panes: {:?}", panes);
-    let mut frame_enabled = panes
-        .iter()
-        .filter(|&&p| !p.is_suppressed)
-        .any(|p| p.pane_content_y > p.pane_y);
+    let current_style = mode_info
+        .pane_frame_style
+        .unwrap_or_else(|| detect_frame_style(&panes));
 
     let frames_for_search =
         config.hide_frames_except_for_search && should_show_frames_for_search(mode_info);
@@ -93,37 +93,35 @@ pub fn hide_frames_conditionally(
         frames_for_fullscreen,
         frames_for_single_pane,
         frames_for_scroll,
-        frame_enabled,
+        current_style,
     );
 
-    if frame_enabled && let PaneFrameStyle::Full = config.frame_style {
-        let full_frames = panes
-            .iter()
-            .filter(|&&p| !p.is_suppressed)
-            .any(|p| p.pane_content_x > p.pane_x);
-
-        if !full_frames {
-            frame_enabled = false;
-        }
-    }
-
-    if (frames_for_search || frames_for_fullscreen || frames_for_single_pane || frames_for_scroll)
-        && !frame_enabled
+    let target_style = if frames_for_search
+        || frames_for_fullscreen
+        || frames_for_single_pane
+        || frames_for_scroll
     {
-        tracing::debug!("activate");
+        config.frame_style
+    } else {
+        PaneFrameStyle::None
+    };
 
-        tracing::debug!("style: {:?}", config.frame_style);
-        set_pane_frame_style(config.frame_style);
+    if current_style != target_style {
+        tracing::debug!("style: {:?}", target_style);
+        set_pane_frame_style(target_style);
     }
+}
 
-    if (!frames_for_search
-        && !frames_for_fullscreen
-        && !frames_for_single_pane
-        && !frames_for_scroll)
-        && frame_enabled
-    {
-        tracing::debug!("deactivate");
-        set_pane_frame_style(PaneFrameStyle::None);
+// Fallback for hosts that do not report the frame style in ModeInfo
+fn detect_frame_style(panes: &[&PaneInfo]) -> PaneFrameStyle {
+    let visible = || panes.iter().filter(|&&p| !p.is_suppressed);
+
+    if visible().any(|p| p.pane_content_x > p.pane_x) {
+        PaneFrameStyle::Full
+    } else if visible().any(|p| p.pane_content_y > p.pane_y) {
+        PaneFrameStyle::Titles
+    } else {
+        PaneFrameStyle::None
     }
 }
 
@@ -168,4 +166,33 @@ fn get_current_panes(tabs: &[TabInfo], pane_info: &PaneManifest) -> Option<Vec<P
     let active_tab = active_tab.as_ref()?;
 
     pane_info.panes.get(&active_tab.position).cloned()
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use rstest::rstest;
+
+    fn pane(content_x: usize, content_y: usize, is_suppressed: bool) -> PaneInfo {
+        PaneInfo {
+            pane_x: 0,
+            pane_y: 0,
+            pane_content_x: content_x,
+            pane_content_y: content_y,
+            is_suppressed,
+            ..PaneInfo::default()
+        }
+    }
+
+    #[rstest]
+    #[case(vec![pane(1, 1, false)], PaneFrameStyle::Full)]
+    #[case(vec![pane(0, 1, false)], PaneFrameStyle::Titles)]
+    #[case(vec![pane(0, 0, false)], PaneFrameStyle::None)]
+    #[case(vec![pane(0, 0, false), pane(0, 1, false)], PaneFrameStyle::Titles)]
+    #[case(vec![pane(0, 0, false), pane(1, 1, true)], PaneFrameStyle::None)]
+    #[case(vec![], PaneFrameStyle::None)]
+    pub fn test_detect_frame_style(#[case] panes: Vec<PaneInfo>, #[case] expected: PaneFrameStyle) {
+        let panes: Vec<&PaneInfo> = panes.iter().collect();
+        assert_eq!(detect_frame_style(&panes), expected);
+    }
 }
